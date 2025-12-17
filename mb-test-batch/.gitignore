@@ -1,0 +1,14 @@
+target
+RhbSMEServices.iml
+.settings/
+.idea/
+.settings
+.idea
+.classpath
+logs
+.project
+.springBeans
+src/test/java/AymanTest.java
+.tern-project
+
+/target/

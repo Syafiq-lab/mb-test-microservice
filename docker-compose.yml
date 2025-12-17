@@ -1,0 +1,87 @@
+services:
+  mb-be:
+    build: ./mb-test-be
+    ports:
+      - "8080:8080"
+      - "9092:9092"
+    environment:
+      SPRING_DATASOURCE_URL: "jdbc:h2:mem:mbTestDb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE"
+      SPRING_DATASOURCE_USERNAME: "sa"
+      SPRING_DATASOURCE_PASSWORD: ""
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: "http://mb-auth:9000"
+      TZ: "Asia/Kuala_Lumpur"
+    develop:
+      watch:
+        - action: rebuild
+          path: ./mb-test-be/src
+        - action: rebuild
+          path: ./mb-test-be/pom.xml
+
+  mb-auth:
+    build: ./mb-test-be
+    ports:
+      - "9000:9000"
+    environment:
+      SPRING_PROFILES_ACTIVE: "auth"
+      TZ: "Asia/Kuala_Lumpur"
+    develop:
+      watch:
+        - action: rebuild
+          path: ./mb-test-be/src
+        - action: rebuild
+          path: ./mb-test-be/pom.xml
+
+  mb-batch:
+    build: ./mb-test-batch
+    ports:
+      - "8081:8081"
+    depends_on:
+      - mb-be
+      - mb-auth
+    volumes:
+      - ./data:/data:ro
+    environment:
+      SPRING_DATASOURCE_URL: "jdbc:h2:tcp://mb-be:9092/mem:mbTestDb"
+      SPRING_DATASOURCE_USERNAME: "sa"
+      SPRING_DATASOURCE_PASSWORD: ""
+      APP_BATCH_IMPORT_TRANSACTIONS_INPUT_RESOURCE: "file:/data/transactions-source.txt"
+      SPRING_BATCH_JOB_NAME: "importTransactionsJob"
+      SPRING_BATCH_JOB_ENABLED: "false"
+      TZ: "Asia/Kuala_Lumpur"
+    develop:
+      watch:
+        - action: rebuild
+          path: ./mb-test-batch/src
+        - action: rebuild
+          path: ./mb-test-batch/pom.xml
+
+    # Keep container running so Ofelia "job-exec" can exec into it
+    entrypoint: ["sh", "-c"]
+    command: ["tail -f /dev/null"]
+
+    labels:
+      ofelia.enabled: "true"
+
+      # Runs daily at 07:05 Asia/Kuala_Lumpur
+      # (Ofelia cron is: second minute hour day month weekday)
+      ofelia.job-exec.importTransactions.schedule: "0 5 7 * * *"
+
+      # Run the batch job inside mb-batch container
+      ofelia.job-exec.importTransactions.command: >
+        java -jar /app/app.jar
+        --spring.batch.job.enabled=true
+        --spring.batch.job.name=importTransactionsJob
+        --app.batch.import-transactions.input-resource=file:/data/transactions-source.txt
+
+      ofelia.job-exec.importTransactions.no-overlap: "true"
+
+  ofelia:
+    image: mcuadros/ofelia:latest
+    depends_on:
+      - mb-batch
+    environment:
+      TZ: "Asia/Kuala_Lumpur"
+    command: ["daemon", "--docker", "-f", "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped

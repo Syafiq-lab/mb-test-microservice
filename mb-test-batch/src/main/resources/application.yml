@@ -1,0 +1,38 @@
+spring:
+  main:
+    web-application-type: servlet
+
+  datasource:
+    driver-class-name: org.h2.Driver
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:tcp://profileservice:9092/mem:profiledb}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+  batch:
+    jdbc:
+      initialize-schema: always
+    job:
+      enabled: false
+      name: importTransactionsJob
+
+app:
+  batch:
+    import-transactions:
+      input-resource: file:/data/transactions-source.txt
+      chunk-size: 100
+      lines-to-skip: 1
+
+management:
+  server:
+    port: 8081
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,batch
+  endpoint:
+    health:
+      show-details: always
