@@ -5,6 +5,7 @@ import mb.batch.transaction.dto.TransactionFileRow;
 import mb.batch.transaction.dto.TransactionInsertRow;
 import mb.batch.transaction.exception.InvalidTransactionRecordException;
 import org.springframework.batch.infrastructure.item.ItemProcessor;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -56,44 +57,82 @@ public class TransactionImportProcessor implements ItemProcessor<TransactionFile
 
     private long resolveOrCreateUserProfileId(String customerId) {
         return userProfileIdCache.computeIfAbsent(customerId, cid -> {
-            // Upsert by customer_id
-            jdbc.update("""
-                MERGE INTO user_profile (customer_id, full_name, email)
-                KEY (customer_id)
-                VALUES (:customerId, :fullName, :email)
-            """, Map.of(
-                    "customerId", cid,
-                    "fullName", "IMPORTED-" + cid,
-                    "email", cid + "@import.local"
-            ));
+            // First, try to find existing user profile
+            Long existingId = findUserProfileId(cid);
+            if (existingId != null) {
+                return existingId;
+            }
 
-            Long id = jdbc.queryForObject(
-                    "select id from user_profile where customer_id = :cid",
-                    Map.of("cid", cid),
-                    Long.class
-            );
-            if (id == null) throw new InvalidTransactionRecordException("user_profile id not found after upsert: " + cid);
-            return id;
+            // If not found, create new user profile
+            try {
+                jdbc.update(
+                    "INSERT INTO user_profile (customer_id, full_name, email) VALUES (:customerId, :fullName, :email)",
+                    Map.of(
+                        "customerId", cid,
+                        "fullName", "IMPORTED-" + cid,
+                        "email", cid + "@import.local"
+                    )
+                );
+
+                Long newId = findUserProfileId(cid);
+                if (newId == null) {
+                    throw new InvalidTransactionRecordException("Failed to create or retrieve user_profile for customerId: " + cid);
+                }
+                return newId;
+            } catch (DataAccessException e) {
+                throw new InvalidTransactionRecordException("Error processing user_profile for customerId: " + e);
+            }
         });
+    }
+
+    private Long findUserProfileId(String customerId) {
+        try {
+            return jdbc.queryForObject(
+                "SELECT id FROM user_profile WHERE customer_id = :cid",
+                Map.of("cid", customerId),
+                Long.class
+            );
+        } catch (DataAccessException e) {
+            return null;
+        }
     }
 
     private long resolveOrCreateAccountId(String accountNumber, long userProfileId) {
         return accountIdCache.computeIfAbsent(accountNumber, acc -> {
-            // Upsert by account_number, always points to this user_profile_id if created
-            jdbc.update("""
-                MERGE INTO account (account_number, user_profile_id)
-                KEY (account_number)
-                VALUES (:acc, :upid)
-            """, Map.of("acc", acc, "upid", userProfileId));
+            // First, try to find existing account
+            Long existingId = findAccountId(acc);
+            if (existingId != null) {
+                return existingId;
+            }
 
-            Long id = jdbc.queryForObject(
-                    "select id from account where account_number = :acc",
-                    Map.of("acc", acc),
-                    Long.class
-            );
-            if (id == null) throw new InvalidTransactionRecordException("account id not found after upsert: " + acc);
-            return id;
+            // If not found, create new account
+            try {
+                jdbc.update(
+                    "INSERT INTO account (account_number, user_profile_id) VALUES (:accountNumber, :userProfileId)",
+                    Map.of("accountNumber", acc, "userProfileId", userProfileId)
+                );
+
+                Long newId = findAccountId(acc);
+                if (newId == null) {
+                    throw new InvalidTransactionRecordException("Failed to create or retrieve account for accountNumber: " + acc);
+                }
+                return newId;
+            } catch (DataAccessException e) {
+                throw new InvalidTransactionRecordException("Error processing account for accountNumber: " + e);
+            }
         });
+    }
+
+    private Long findAccountId(String accountNumber) {
+        try {
+            return jdbc.queryForObject(
+                "SELECT id FROM account WHERE account_number = :acc",
+                Map.of("acc", accountNumber),
+                Long.class
+            );
+        } catch (DataAccessException e) {
+            return null;
+        }
     }
 
     private static String trim(String s) {

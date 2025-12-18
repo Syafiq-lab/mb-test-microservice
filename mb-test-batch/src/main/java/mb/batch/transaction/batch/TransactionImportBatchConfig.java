@@ -40,7 +40,7 @@ public class TransactionImportBatchConfig {
     @Value("${app.batch.import-transactions.chunk-size:100}")
     private int chunkSize;
 
-    @Value("${app.batch.import-transactions.input-resource:classpath:batch/transactions-source.txt}")
+    @Value("${app.batch.import-transactions.input-resource:file:/data/transactions-source.txt}")
     private String defaultInputResource;
 
     @Bean
@@ -81,12 +81,18 @@ public class TransactionImportBatchConfig {
     public LineMapper<TransactionFileRow> transactionLineMapper() {
         DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
         tokenizer.setDelimiter("|");
-        tokenizer.setNames("accountNumber", "trxAmount", "description", "trxDate", "trxTime", "customerId");
-        tokenizer.setStrict(true);
+        tokenizer.setNames("ACCOUNT_NUMBER", "TRX_AMOUNT", "DESCRIPTION", "TRX_DATE", "TRX_TIME", "CUSTOMER_ID");
+        tokenizer.setStrict(false);  // Changed to false to handle blank lines gracefully
 
         DefaultLineMapper<TransactionFileRow> mapper = new DefaultLineMapper<>();
         mapper.setLineTokenizer(tokenizer);
-        mapper.setFieldSetMapper(this::mapFieldSet);
+        mapper.setFieldSetMapper(fieldSet -> {
+            // Skip blank lines completely
+            if (fieldSet == null || fieldSet.getFieldCount() == 0) {
+                return null;
+            }
+            return mapFieldSet(fieldSet);
+        });
         return mapper;
     }
 
@@ -105,17 +111,19 @@ public class TransactionImportBatchConfig {
 
         FlatFileItemReader<TransactionFileRow> reader = new FlatFileItemReader<>(resource, transactionLineMapper);
         reader.setName("transactionFileReader");
-        reader.setLinesToSkip(1);
-        reader.setRecordSeparatorPolicy(new TrimBlankLineRecordSeparatorPolicy()); // handles blank lines
+        reader.setLinesToSkip(1);  // Skip header
+        reader.setRecordSeparatorPolicy(new TrimBlankLineRecordSeparatorPolicy());
         return reader;
     }
 
     private TransactionFileRow mapFieldSet(FieldSet fs) {
-        String accountNumber = trimToNull(fs.readString("accountNumber"));
-        String customerId    = trimToNull(fs.readString("customerId"));
-        String trxDateStr    = trimToNull(fs.readString("trxDate"));
-        String trxTimeStr    = trimToNull(fs.readString("trxTime"));
-        String desc          = trimToNull(fs.readString("description"));
+        if (fs == null) return null;
+        
+        String accountNumber = trimToNull(fs.readString("ACCOUNT_NUMBER"));
+        String customerId    = trimToNull(fs.readString("CUSTOMER_ID"));
+        String trxDateStr    = trimToNull(fs.readString("TRX_DATE"));
+        String trxTimeStr    = trimToNull(fs.readString("TRX_TIME"));
+        String desc          = trimToNull(fs.readString("DESCRIPTION"));
 
         if (accountNumber == null || customerId == null || trxDateStr == null || trxTimeStr == null) {
             throw new mb.batch.transaction.exception.InvalidTransactionRecordException(
@@ -126,7 +134,7 @@ public class TransactionImportBatchConfig {
 
         return TransactionFileRow.builder()
                 .accountNumber(accountNumber)
-                .trxAmount(readBigDecimal(fs, "trxAmount"))
+                .trxAmount(readBigDecimal(fs, "TRX_AMOUNT"))
                 .description(desc)
                 .trxDate(LocalDate.parse(trxDateStr))
                 .trxTime(LocalTime.parse(trxTimeStr))

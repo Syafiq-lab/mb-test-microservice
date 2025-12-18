@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 
 @Entity
-@Table(name = "api")
+@Table(name = "transaction")
 @Getter
 @Setter
 @NoArgsConstructor
