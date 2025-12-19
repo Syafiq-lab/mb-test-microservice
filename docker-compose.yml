@@ -42,7 +42,7 @@ services:
       - ./data:/data:ro
     environment:
       SPRING_PROFILES_ACTIVE: "docker"
-      SPRING_DATASOURCE_URL: "jdbc:h2:mem:mbTestDb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE"
+      SPRING_DATASOURCE_URL: "jdbc:h2:tcp://mb-be:9092/mem:mbTestDb;IFEXISTS=TRUE"
       SPRING_DATASOURCE_USERNAME: "sa"
       SPRING_DATASOURCE_PASSWORD: ""
       APP_BATCH_IMPORT_TRANSACTIONS_INPUT_RESOURCE: "file:/data/transactions-source.txt"
@@ -67,7 +67,7 @@ services:
 
       # Runs daily at 07:05 Asia/Kuala_Lumpur
       # (Ofelia cron is: second minute hour day month weekday)
-      ofelia.job-exec.importTransactions.schedule: "0 2 8 * * *"
+      ofelia.job-exec.importTransactions.schedule: "0 26 11 * * *"
 
       # Run the batch job inside mb-batch container
       ofelia.job-exec.importTransactions.command: >
