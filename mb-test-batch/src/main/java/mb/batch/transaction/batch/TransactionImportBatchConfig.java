@@ -1,11 +1,11 @@
 package mb.batch.transaction.batch;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import mb.batch.transaction.dto.TransactionFileRow;
 import mb.batch.transaction.dto.TransactionInsertRow;
 import mb.batch.transaction.exception.InvalidTransactionRecordException;
 import mb.batch.transaction.util.TransactionImportSkipListener;
-import mb.batch.transaction.util.TrimBlankLineRecordSeparatorPolicy;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.job.parameters.RunIdIncrementer;
@@ -25,14 +25,18 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.ResourcePatternResolver;
-import org.springframework.lang.NonNull;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 
+@Slf4j
 @Configuration
 @RequiredArgsConstructor
 public class TransactionImportBatchConfig {
@@ -70,30 +74,34 @@ public class TransactionImportBatchConfig {
                 .listener(loggingListener)
                 .faultTolerant()
                 .skipLimit(500)
-                .skip(org.springframework.batch.infrastructure.item.file.FlatFileParseException.class)
+                .skip(FlatFileParseException.class)
                 .skip(InvalidTransactionRecordException.class)
                 .skipListener(skipListener)
                 .build();
     }
 
-
+    /**
+     * One physical line = one record.
+     * Blank lines are SKIPPED by throwing FlatFileParseException (so the reader never returns null early).
+     */
     @Bean
     public LineMapper<TransactionFileRow> transactionLineMapper() {
         DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
         tokenizer.setDelimiter("|");
         tokenizer.setNames("ACCOUNT_NUMBER", "TRX_AMOUNT", "DESCRIPTION", "TRX_DATE", "TRX_TIME", "CUSTOMER_ID");
-        tokenizer.setStrict(false);  // Changed to false to handle blank lines gracefully
+        tokenizer.setStrict(false);
 
-        DefaultLineMapper<TransactionFileRow> mapper = new DefaultLineMapper<>();
-        mapper.setLineTokenizer(tokenizer);
-        mapper.setFieldSetMapper(fieldSet -> {
-            // Skip blank lines completely
-            if (fieldSet == null || fieldSet.getFieldCount() == 0) {
-                return null;
+        DefaultLineMapper<TransactionFileRow> delegate = new DefaultLineMapper<>();
+        delegate.setLineTokenizer(tokenizer);
+        delegate.setFieldSetMapper(this::mapFieldSet);
+
+        return (line, lineNumber) -> {
+            if (line == null || line.trim().isEmpty()) {
+                // blank line between records -> skip as read error
+                throw new FlatFileParseException("Blank line", line, lineNumber);
             }
-            return mapFieldSet(fieldSet);
-        });
-        return mapper;
+            return delegate.mapLine(line, lineNumber);
+        };
     }
 
     @Bean
@@ -109,16 +117,62 @@ public class TransactionImportBatchConfig {
 
         Resource resource = resolver.getResource(location);
 
+        // ---- Resource diagnostics ----
+        log.info("[READER] jobParam.inputResource='{}' default='{}' resolved='{}'",
+                inputResource, defaultInputResource, location);
+        log.info("[READER] resource='{}' exists={} readable={}",
+                resource.getDescription(), resource.exists(), resource.isReadable());
+        try {
+            log.info("[READER] uri={}", resource.getURI());
+        } catch (Exception e) {
+            log.warn("[READER] cannot get URI: {}", e.toString());
+        }
+        try {
+            if (resource.isFile()) {
+                var f = resource.getFile();
+                log.info("[READER] filePath={} sizeBytes={} lastModified={}",
+                        f.getAbsolutePath(), f.length(), Instant.ofEpochMilli(f.lastModified()));
+            }
+        } catch (Exception e) {
+            log.warn("[READER] cannot access file metadata: {}", e.toString());
+        }
+        previewFirstLines(resource, 10);
+        // ----------------------------
+
         FlatFileItemReader<TransactionFileRow> reader = new FlatFileItemReader<>(resource, transactionLineMapper);
         reader.setName("transactionFileReader");
-        reader.setLinesToSkip(1);  // Skip header
-        reader.setRecordSeparatorPolicy(new TrimBlankLineRecordSeparatorPolicy());
+
+        // fail fast if file missing (default is true, keeping explicit)
+        reader.setStrict(true);
+
+        reader.setLinesToSkip(1);
+        reader.setSkippedLinesCallback(line -> log.info("[READER] skippedHeader='{}'", line));
+
+        // IMPORTANT FIX: DO NOT use RecordSeparatorPolicy for “blank lines between records”
+        // reader.setRecordSeparatorPolicy(new TrimBlankLineRecordSeparatorPolicy());
+
         return reader;
     }
 
+    private void previewFirstLines(Resource resource, int maxLines) {
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8))) {
+            for (int i = 1; i <= maxLines; i++) {
+                String line = br.readLine();
+                if (line == null) break;
+                log.info("[READER-PREVIEW] {}: [{}]", i, line);
+            }
+        } catch (Exception e) {
+            log.warn("[READER-PREVIEW] failed: {}", e.toString());
+        }
+    }
+
     private TransactionFileRow mapFieldSet(FieldSet fs) {
-        if (fs == null) return null;
-        
+        if (fs == null) {
+            // never return null here; treat as parse error (will be skipped via FlatFileParseException)
+            throw new IllegalArgumentException("FieldSet is null");
+        }
+
         String accountNumber = trimToNull(fs.readString("ACCOUNT_NUMBER"));
         String customerId    = trimToNull(fs.readString("CUSTOMER_ID"));
         String trxDateStr    = trimToNull(fs.readString("TRX_DATE"));
@@ -126,9 +180,11 @@ public class TransactionImportBatchConfig {
         String desc          = trimToNull(fs.readString("DESCRIPTION"));
 
         if (accountNumber == null || customerId == null || trxDateStr == null || trxTimeStr == null) {
-            throw new mb.batch.transaction.exception.InvalidTransactionRecordException(
+            throw new InvalidTransactionRecordException(
                     "Missing required fields. accountNumber=" + accountNumber +
-                            ", customerId=" + customerId + ", trxDate=" + trxDateStr + ", trxTime=" + trxTimeStr
+                            ", customerId=" + customerId +
+                            ", trxDate=" + trxDateStr +
+                            ", trxTime=" + trxTimeStr
             );
         }
 
@@ -148,7 +204,6 @@ public class TransactionImportBatchConfig {
         return t.isEmpty() ? null : t;
     }
 
-
     private static BigDecimal readBigDecimal(FieldSet fs, String name) {
         String raw = fs.readString(name);
         return raw == null || raw.isBlank() ? BigDecimal.ZERO : new BigDecimal(raw.trim());
@@ -159,10 +214,10 @@ public class TransactionImportBatchConfig {
         JdbcBatchItemWriter<TransactionInsertRow> writer = new JdbcBatchItemWriter<>();
         writer.setDataSource(dataSource);
 
-        // Quote table name because "transaction" can be problematic in SQL dialects
+        // Use uppercase quoted table name to match unquoted-created TRANSACTION in H2 and avoid keyword issues.
         writer.setSql("""
-            INSERT INTO "transaction"
-              (version, account_id, amount, description, trx_date, trx_time, customer_id, created_at, updated_at)
+            INSERT INTO "TRANSACTION"
+              (VERSION, ACCOUNT_ID, AMOUNT, DESCRIPTION, TRX_DATE, TRX_TIME, CUSTOMER_ID, CREATED_AT, UPDATED_AT)
             VALUES
               (:version, :accountId, :amount, :description, :trxDate, :trxTime, :customerId, :createdAt, :updatedAt)
         """);
